@@ -1,0 +1,6 @@
+node_modules
+.git
+.DS_Store
+analyze-tile-colors.js
+analyze-tile-colors2.js
+fly.toml
