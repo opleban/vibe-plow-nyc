@@ -413,7 +413,7 @@ html, body {
 /* ─── Stats bar ─── */
 .stats-bar {
   position: fixed;
-  bottom: 36px;
+  bottom: 120px;
   right: 20px;
   z-index: 90;
   display: flex;
@@ -651,7 +651,7 @@ html, body {
   .search-box input { font-size: 13px; padding: 8px 12px 8px 36px; }
   .legend-panel { left: 10px; bottom: 72px; padding: 12px 14px; min-width: 180px; }
   .legend-item { font-size: 11px; gap: 8px; }
-  .stats-bar { right: 10px; bottom: 72px; flex-direction: column; gap: 6px; }
+  .stats-bar { right: 10px; bottom: 140px; flex-direction: column; gap: 6px; }
   .stat-card { padding: 10px 12px; min-width: 76px; }
   .stat-value { font-size: 16px; }
   .layer-panel { top: 60px; right: 10px; }
