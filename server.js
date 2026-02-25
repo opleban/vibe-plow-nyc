@@ -50,7 +50,15 @@ function setCachedTile(key, buffer) {
   tileCache.set(key, { buffer, timestamp: Date.now() });
 }
 
-function remapPixels(data) {
+// Designation tile colors (raw from NYC API)
+const DESIG_COLORS = [
+  [0xbf, 0x40, 0x2e], // Critical
+  [0x11, 0x41, 0xaf], // Sector
+  [0xa0, 0xcc, 0x17], // Narrow
+  [0xff, 0xc2, 0x1e], // Non-DSNY
+];
+
+function remapPixels(data, hideSet) {
   // data is a raw RGBA buffer
   const len = data.length;
   for (let i = 0; i < len; i += 4) {
@@ -79,6 +87,12 @@ function remapPixels(data) {
     // Only remap if the pixel is reasonably close to a known color
     // (threshold accounts for anti-aliasing and compression artifacts)
     if (bestDist < 12000) {
+      // If this color index is hidden, make pixel transparent
+      if (hideSet && hideSet.has(bestIdx)) {
+        data[i + 3] = 0;
+        continue;
+      }
+
       const d = COLOR_MAP[bestIdx].dst;
       const s = COLOR_MAP[bestIdx].src;
 
@@ -100,20 +114,39 @@ function remapPixels(data) {
   return data;
 }
 
-async function remapTile(inputBuffer) {
+function filterDesigPixels(data, hideSet) {
+  const len = data.length;
+  for (let i = 0; i < len; i += 4) {
+    if (data[i + 3] === 0) continue;
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    let bestIdx = -1, bestDist = Infinity;
+    for (let j = 0; j < DESIG_COLORS.length; j++) {
+      const c = DESIG_COLORS[j];
+      const dr = r - c[0], dg = g - c[1], db = b - c[2];
+      const dist = dr * dr + dg * dg + db * db;
+      if (dist < bestDist) { bestDist = dist; bestIdx = j; }
+    }
+    if (bestDist < 12000 && hideSet.has(bestIdx)) {
+      data[i + 3] = 0;
+    }
+  }
+  return data;
+}
+
+async function remapTile(inputBuffer, hideSet) {
   const image = sharp(inputBuffer);
-  const { width, height, channels } = await image.metadata();
-
-  // Extract raw pixel data
+  const { width, height } = await image.metadata();
   const raw = await image.ensureAlpha().raw().toBuffer();
+  remapPixels(raw, hideSet);
+  return sharp(raw, { raw: { width, height, channels: 4 } }).png().toBuffer();
+}
 
-  // Remap colors
-  remapPixels(raw);
-
-  // Re-encode as PNG
-  return sharp(raw, { raw: { width, height, channels: 4 } })
-    .png()
-    .toBuffer();
+async function filterDesigTile(inputBuffer, hideSet) {
+  const image = sharp(inputBuffer);
+  const { width, height } = await image.metadata();
+  const raw = await image.ensureAlpha().raw().toBuffer();
+  filterDesigPixels(raw, hideSet);
+  return sharp(raw, { raw: { width, height, channels: 4 } }).png().toBuffer();
 }
 
 // ── MIME types ──────────────────────────────────────────────────
@@ -132,21 +165,45 @@ const MIME_TYPES = {
 const server = http.createServer((req, res) => {
   // Proxy API requests
   if (req.url.startsWith('/api/')) {
-    const targetPath = '/mappingapi' + req.url;
+    // Parse and strip the `hide` filter param (not forwarded to NYC API)
+    const parsed = new URL(req.url, 'http://localhost');
+    const hideStr = parsed.searchParams.get('hide') || '';
+    const hideSet = hideStr ? new Set(hideStr.split(',').map(Number)) : null;
+    parsed.searchParams.delete('hide');
+    const cleanUrl = parsed.pathname + parsed.search;
+
+    const targetPath = '/mappingapi' + cleanUrl;
     const targetUrl = API_TARGET + targetPath;
 
     const isTileReq = targetPath.includes('highlight') && !targetPath.includes('active') && !targetPath.includes('info');
     const isPlowTile = isTileReq && targetPath.includes('VISITED');
+    const isDesigTile = isTileReq && !isPlowTile;
 
-    if (isPlowTile) {
-      const cached = getCachedTile(req.url);
-      if (cached) {
-        res.writeHead(200, {
-          'Content-Type': 'image/png',
-          'Cache-Control': 'public, max-age=300',
-          'Access-Control-Allow-Origin': '*',
-        });
-        res.end(cached);
+    // For tiles: check raw cache (keyed by URL without hide param)
+    if (isPlowTile || isDesigTile) {
+      const rawCached = getCachedTile(cleanUrl);
+      if (rawCached) {
+        (async () => {
+          try {
+            let outputBuf;
+            if (isPlowTile) {
+              outputBuf = await remapTile(rawCached, hideSet);
+            } else if (hideSet && hideSet.size > 0) {
+              outputBuf = await filterDesigTile(rawCached, hideSet);
+            } else {
+              outputBuf = rawCached;
+            }
+            res.writeHead(200, {
+              'Content-Type': 'image/png',
+              'Cache-Control': 'public, max-age=300',
+              'Access-Control-Allow-Origin': '*',
+            });
+            res.end(outputBuf);
+          } catch {
+            res.writeHead(200, { 'Content-Type': 'image/png', 'Access-Control-Allow-Origin': '*' });
+            res.end(rawCached);
+          }
+        })();
         return;
       }
     }
@@ -164,35 +221,41 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      // For plow tiles: buffer the response, remap colors, then send
-      if (isPlowTile && proxyRes.statusCode === 200) {
+      // For tile requests: buffer the response, process, then send
+      if ((isPlowTile || isDesigTile) && proxyRes.statusCode === 200) {
         const chunks = [];
         proxyRes.on('data', chunk => chunks.push(chunk));
         proxyRes.on('end', async () => {
+          const inputBuf = Buffer.concat(chunks);
+          // Cache the raw tile (before any processing)
+          setCachedTile(cleanUrl, inputBuf);
           try {
-            const inputBuf = Buffer.concat(chunks);
-            const outputBuf = await remapTile(inputBuf);
-            setCachedTile(req.url, outputBuf);
+            let outputBuf;
+            if (isPlowTile) {
+              outputBuf = await remapTile(inputBuf, hideSet);
+            } else if (hideSet && hideSet.size > 0) {
+              outputBuf = await filterDesigTile(inputBuf, hideSet);
+            } else {
+              outputBuf = inputBuf;
+            }
             res.writeHead(200, {
               'Content-Type': 'image/png',
               'Cache-Control': 'public, max-age=300',
               'Access-Control-Allow-Origin': '*',
             });
             res.end(outputBuf);
-          } catch (err) {
-            // If remapping fails, forward original
+          } catch {
             res.writeHead(200, {
               'Content-Type': proxyRes.headers['content-type'] || 'image/png',
-              'Cache-Control': proxyRes.headers['cache-control'] || 'no-cache',
               'Access-Control-Allow-Origin': '*',
             });
-            res.end(Buffer.concat(chunks));
+            res.end(inputBuf);
           }
         });
         return;
       }
 
-      // Non-plow tiles and other API responses: pipe directly
+      // Other API responses: pipe directly
       res.writeHead(proxyRes.statusCode, {
         'Content-Type': proxyRes.headers['content-type'] || 'application/octet-stream',
         'Cache-Control': proxyRes.headers['cache-control'] || 'no-cache',
