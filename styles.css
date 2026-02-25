@@ -504,6 +504,29 @@ html, body {
   text-transform: uppercase;
 }
 
+/* ─── Attribution ─── */
+.attribution {
+  position: fixed;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 81;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.3px;
+}
+
+.attribution a {
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.attribution a:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
 /* ─── Mapbox overrides ─── */
 .mapboxgl-ctrl-attrib { font-size: 10px !important; }
 .mapboxgl-ctrl-group { border-radius: 10px !important; overflow: hidden; }
