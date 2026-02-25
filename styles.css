@@ -413,7 +413,7 @@ html, body {
 /* ─── Stats bar ─── */
 .stats-bar {
   position: fixed;
-  bottom: 120px;
+  bottom: 30px;
   right: 55px;
   z-index: 90;
   display: flex;
